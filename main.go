@@ -40,8 +40,6 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
-const defaultDataDir = "/usr/local/var/lib/shibudb"
-
 type runtimePaths struct {
 	dataDir  string
 	authFile string
@@ -49,15 +47,25 @@ type runtimePaths struct {
 	pidFile  string
 }
 
+func defaultDataDir() string {
+	// Prefer XDG if present, otherwise fall back to ~/.shibudb.
+	// This keeps the server fully runnable without sudo by default.
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
+		return filepath.Join(xdg, "shibudb")
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".shibudb")
+	}
+	// As a last resort, use CWD (still non-root).
+	return ".shibudb"
+}
+
 func newRuntimePaths(dataDir string) runtimePaths {
-	// Mirror the original layout: lib/shibudb -> log/shibudb.log, run/shibudb.pid
-	// Works for any Homebrew prefix (/usr/local or /opt/homebrew).
-	varDir := filepath.Dir(filepath.Dir(dataDir)) // e.g. /usr/local/var
 	return runtimePaths{
 		dataDir:  dataDir,
 		authFile: filepath.Join(dataDir, "users.json"),
-		logFile:  filepath.Join(varDir, "log", "shibudb.log"),
-		pidFile:  filepath.Join(varDir, "run", "shibudb.pid"),
+		logFile:  filepath.Join(dataDir, "shibudb.log"),
+		pidFile:  filepath.Join(dataDir, "shibudb.pid"),
 	}
 }
 
@@ -122,7 +130,7 @@ func main() {
 
 	case "start":
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
-		dataDir := fs.String("data-dir", defaultDataDir, "data directory for auth and storage files")
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory for auth and storage files")
 		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
 		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
 		fs.Parse(os.Args[2:]) //nolint
@@ -145,13 +153,13 @@ func main() {
 
 	case "stop":
 		fs := flag.NewFlagSet("stop", flag.ExitOnError)
-		dataDir := fs.String("data-dir", defaultDataDir, "data directory (used to locate the PID file)")
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory (used to locate the PID file)")
 		fs.Parse(os.Args[2:]) //nolint
 		stopServer(newRuntimePaths(*dataDir))
 
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
-		dataDir := fs.String("data-dir", defaultDataDir, "data directory for auth and storage files")
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory for auth and storage files")
 		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
 		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
 		fs.Parse(os.Args[2:]) //nolint
@@ -180,11 +188,28 @@ func main() {
 		server.StartServer(args[0], paths.authFile, maxConnections, paths.dataDir)
 
 	case "connect":
-		if len(os.Args) != 3 {
-			fmt.Println("Usage: shibudb connect <port>")
+		fs := flag.NewFlagSet("connect", flag.ExitOnError)
+		username := fs.String("username", "", "username (optional; will prompt if omitted)")
+		password := fs.String("password", "", "password (optional; will prompt if omitted)")
+		// Shorthands for convenience/backwards habits
+		_ = fs.String("user", "", "alias for --username") // parsed below
+		_ = fs.String("pass", "", "alias for --password") // parsed below
+		fs.Parse(os.Args[2:])                             //nolint
+		args := fs.Args()
+		if len(args) != 1 {
+			fmt.Println("Usage: shibudb connect [--username <u> --password <p>] <port>")
 			return
 		}
-		connectToServer(os.Args[2])
+		// If user passed aliases, honor them.
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "user" && *username == "" {
+				*username = f.Value.String()
+			}
+			if f.Name == "pass" && *password == "" {
+				*password = f.Value.String()
+			}
+		})
+		connectToServer(args[0], *username, *password)
 
 	case "manager":
 		if len(os.Args) < 4 {
@@ -212,8 +237,8 @@ func printVersion() {
 func printHelp() {
 	fmt.Println(`ShibuDB - Lightweight Embedded Database
 Usage:
-  sudo shibudb start <port> [max_connections]  Start the ShibuDB server as a background process
-  sudo shibudb stop                             Stop the ShibuDB background server
+  shibudb start <port> [max_connections]        Start the ShibuDB server as a background process
+  shibudb stop                                  Stop the ShibuDB background server
   shibudb connect <port>                        Connect to the ShibuDB CLI client
   shibudb manager <port> <command>              Manage connection limits at runtime
   shibudb --version                             Show version information
@@ -238,17 +263,22 @@ Manager Commands:
   health                    Check server health
 
 Examples:
-  sudo shibudb start 9090              # Start with default 1000 connections
-  sudo shibudb start 9090 500          # Start with 500 connection limit
+  shibudb start 9090                   # Start with default 1000 connections
+  shibudb start 9090 500               # Start with 500 connection limit
+  shibudb start --admin-user admin --admin-password admin 9090
+                                      # First start: bootstrap admin non-interactively
+  shibudb connect --username admin --password admin 9090
+                                      # Connect non-interactively
   shibudb manager 9090 status          # Check current connection status
   shibudb manager 9090 limit 2000      # Set limit to 2000
   shibudb manager 9090 increase 500    # Increase limit by 500
   kill -USR1 <pid>                     # Increase limit by 100 via signal
 
-Note: Start and stop commands require sudo privileges.`)
+Note: By default, ShibuDB stores runtime files under your home directory.
+You can override paths with --data-dir.`)
 }
 
-func connectToServer(port string) {
+func connectToServer(port, providedUser, providedPass string) {
 	conn, err := net.Dial("tcp", "localhost:"+port)
 	if err != nil {
 		fmt.Printf("Failed to connect to server: %v\n", err)
@@ -260,8 +290,14 @@ func connectToServer(port string) {
 	serverReader := bufio.NewReader(conn)
 
 	// --- Login Prompt ---
-	username := readLine("Username: ", reader)
-	password := readLine("Password: ", reader)
+	username := strings.TrimSpace(providedUser)
+	password := strings.TrimSpace(providedPass)
+	if username == "" {
+		username = readLine("Username: ", reader)
+	}
+	if password == "" {
+		password = readLine("Password: ", reader)
+	}
 
 	login := models.LoginRequest{Username: username, Password: password}
 	data, _ := json.Marshal(login)
@@ -694,13 +730,7 @@ func startServer(port string, maxConnections int32, paths runtimePaths, adminUse
 	// Check if server is already running
 	if running, pid := isServerRunning(paths.pidFile); running {
 		fmt.Printf("%sError:%s ShibuDB server is already running (PID: %d)\n", red, reset, pid)
-		fmt.Printf("Use 'sudo shibudb stop' to stop the existing server first.\n")
-		os.Exit(1)
-	}
-
-	// Check if running with sudo privileges
-	if !isRunningAsRoot() {
-		fmt.Printf("%sError:%s ShibuDB requires sudo privileges to run. Please run with 'sudo shibudb start %s'.\n", red, reset, port)
+		fmt.Printf("Use 'shibudb stop' (or specify --data-dir) to stop the existing server first.\n")
 		os.Exit(1)
 	}
 
@@ -768,12 +798,6 @@ func startServer(port string, maxConnections int32, paths runtimePaths, adminUse
 }
 
 func stopServer(paths runtimePaths) {
-	// Check if running with sudo privileges
-	if !isRunningAsRoot() {
-		fmt.Printf("%sError:%s ShibuDB stop command requires sudo privileges. Please run with 'sudo shibudb stop'.\n", red, reset)
-		os.Exit(1)
-	}
-
 	// Check if server is running
 	if running, pid := isServerRunning(paths.pidFile); !running {
 		fmt.Printf("%sError:%s ShibuDB server is not running.\n", red, reset)
