@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -39,11 +40,26 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
-const (
-	logFilePath  = "/usr/local/var/log/shibudb.log"
-	pidFile      = "/usr/local/var/run/shibudb.pid"
-	authFilePath = "/usr/local/var/lib/shibudb/users.json"
-)
+const defaultDataDir = "/usr/local/var/lib/shibudb"
+
+type runtimePaths struct {
+	dataDir  string
+	authFile string
+	logFile  string
+	pidFile  string
+}
+
+func newRuntimePaths(dataDir string) runtimePaths {
+	// Mirror the original layout: lib/shibudb -> log/shibudb.log, run/shibudb.pid
+	// Works for any Homebrew prefix (/usr/local or /opt/homebrew).
+	varDir := filepath.Dir(filepath.Dir(dataDir)) // e.g. /usr/local/var
+	return runtimePaths{
+		dataDir:  dataDir,
+		authFile: filepath.Join(dataDir, "users.json"),
+		logFile:  filepath.Join(varDir, "log", "shibudb.log"),
+		pidFile:  filepath.Join(varDir, "run", "shibudb.pid"),
+	}
+}
 
 // Version and BuildTime will be injected at build time via ldflags
 var (
@@ -65,13 +81,13 @@ func isRunningAsRoot() bool {
 	return os.Geteuid() == 0
 }
 
-// Check if server is already running
-func isServerRunning() (bool, int) {
-	if _, err := os.Stat(pidFile); err != nil {
+// isServerRunning checks whether a server process is running by reading pidFilePath.
+func isServerRunning(pidFilePath string) (bool, int) {
+	if _, err := os.Stat(pidFilePath); err != nil {
 		return false, 0
 	}
 
-	pidData, err := os.ReadFile(pidFile)
+	pidData, err := os.ReadFile(pidFilePath)
 	if err != nil {
 		return false, 0
 	}
@@ -103,54 +119,83 @@ func main() {
 	switch os.Args[1] {
 	case "--version":
 		printVersion()
+
 	case "start":
-		if len(os.Args) < 3 || len(os.Args) > 4 {
-			fmt.Println("Usage: shibudb start <port> [max_connections]")
+		fs := flag.NewFlagSet("start", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir, "data directory for auth and storage files")
+		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
+		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
+		fs.Parse(os.Args[2:]) //nolint
+		args := fs.Args()
+		if len(args) < 1 || len(args) > 2 {
+			fmt.Println("Usage: shibudb start [--data-dir <path>] [--admin-user <u> --admin-password <p>] <port> [max_connections]")
 			return
 		}
-		port := os.Args[2]
-		maxConnections := int32(1000) // Default limit
-		if len(os.Args) == 4 {
-			if max, err := strconv.ParseInt(os.Args[3], 10, 32); err == nil && max > 0 {
+		port := args[0]
+		maxConnections := int32(1000)
+		if len(args) == 2 {
+			if max, err := strconv.ParseInt(args[1], 10, 32); err == nil && max > 0 {
 				maxConnections = int32(max)
 			} else {
 				fmt.Println("Invalid max_connections value. Must be a positive integer.")
 				return
 			}
 		}
-		startServer(port, maxConnections)
+		startServer(port, maxConnections, newRuntimePaths(*dataDir), *adminUser, *adminPass)
+
 	case "stop":
-		stopServer()
+		fs := flag.NewFlagSet("stop", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir, "data directory (used to locate the PID file)")
+		fs.Parse(os.Args[2:]) //nolint
+		stopServer(newRuntimePaths(*dataDir))
+
 	case "run":
-		if len(os.Args) < 3 || len(os.Args) > 4 {
-			fmt.Println("Usage: shibudb run <port> [max_connections]")
+		fs := flag.NewFlagSet("run", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir, "data directory for auth and storage files")
+		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
+		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
+		fs.Parse(os.Args[2:]) //nolint
+		args := fs.Args()
+		if len(args) < 1 || len(args) > 2 {
+			fmt.Println("Usage: shibudb run [--data-dir <path>] [--admin-user <u> --admin-password <p>] <port> [max_connections]")
 			return
 		}
-		maxConnections := int32(1000) // Default limit
-		if len(os.Args) == 4 {
-			if max, err := strconv.ParseInt(os.Args[3], 10, 32); err == nil && max > 0 {
+		maxConnections := int32(1000)
+		if len(args) == 2 {
+			if max, err := strconv.ParseInt(args[1], 10, 32); err == nil && max > 0 {
 				maxConnections = int32(max)
 			} else {
 				fmt.Println("Invalid max_connections value. Must be a positive integer.")
 				return
 			}
 		}
-		server.StartServer(os.Args[2], authFilePath, maxConnections, "/usr/local/var/lib/shibudb")
+		paths := newRuntimePaths(*dataDir)
+		// Pre-bootstrap admin non-interactively if credentials are provided.
+		// This ensures the auth file exists before StartServer's own NewAuthManager call.
+		if *adminUser != "" && *adminPass != "" {
+			if _, err := auth.NewAuthManagerWithBootstrap(paths.authFile, *adminUser, *adminPass); err != nil {
+				log.Fatalf("Failed to bootstrap admin: %v", err)
+			}
+		}
+		server.StartServer(args[0], paths.authFile, maxConnections, paths.dataDir)
+
 	case "connect":
 		if len(os.Args) != 3 {
 			fmt.Println("Usage: shibudb connect <port>")
 			return
 		}
 		connectToServer(os.Args[2])
+
 	case "manager":
-		// Handle manager commands directly
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: shibudb manager <port> <command>")
 			return
 		}
 		handleManagerCommand(os.Args[2:])
+
 	case "--help":
 		printHelp()
+
 	default:
 		fmt.Println("Unknown command:", os.Args[1])
 	}
@@ -645,9 +690,9 @@ func printStartupBanner() {
 	fmt.Printf("%sDocs   :%s https://github.com/shibudb.org/shibudb-server\n", blue, reset)
 }
 
-func startServer(port string, maxConnections int32) {
+func startServer(port string, maxConnections int32, paths runtimePaths, adminUser, adminPass string) {
 	// Check if server is already running
-	if running, pid := isServerRunning(); running {
+	if running, pid := isServerRunning(paths.pidFile); running {
 		fmt.Printf("%sError:%s ShibuDB server is already running (PID: %d)\n", red, reset, pid)
 		fmt.Printf("Use 'sudo shibudb stop' to stop the existing server first.\n")
 		os.Exit(1)
@@ -659,20 +704,24 @@ func startServer(port string, maxConnections int32) {
 		os.Exit(1)
 	}
 
-	_, err := auth.NewAuthManager(authFilePath)
+	_, err := auth.NewAuthManagerWithBootstrap(paths.authFile, adminUser, adminPass)
 	if err != nil {
 		log.Fatalf("Failed to initialize auth manager: %v", err)
 	}
 	printStartupBanner()
 
-	// Build command with max connections parameter
-	cmdArgs := []string{"run", port}
-	if maxConnections != 1000 { // Only add if not default
+	// Build command: pass --data-dir and any bootstrap credentials to the forked run process
+	cmdArgs := []string{"run", "--data-dir", paths.dataDir}
+	if adminUser != "" {
+		cmdArgs = append(cmdArgs, "--admin-user", adminUser, "--admin-password", adminPass)
+	}
+	cmdArgs = append(cmdArgs, port)
+	if maxConnections != 1000 {
 		cmdArgs = append(cmdArgs, strconv.FormatInt(int64(maxConnections), 10))
 	}
 	cmd := exec.Command(os.Args[0], cmdArgs...)
 
-	logFile := openLogFile()
+	logFile := openLogFile(paths.logFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -698,30 +747,27 @@ func startServer(port string, maxConnections int32) {
 	}
 
 	// Create PID file directory and write PID
-	pidDir := filepath.Dir(pidFile)
+	pidDir := filepath.Dir(paths.pidFile)
 	err = os.MkdirAll(pidDir, 0755)
 	if err != nil {
 		log.Fatalf("Failed to create PID directory: %v", err)
 	}
 
-	err = os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
+	err = os.WriteFile(paths.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
 	if err != nil {
 		log.Fatalf("Failed to write PID file: %v", err)
 	}
 
-	// Note: The actual limit used by the server may be different due to persistence
-	// The server will show the actual limit in its startup logs
 	fmt.Printf("%sShibuDB started on port %s (PID: %d, max connections: %d)%s\n", green, port, cmd.Process.Pid, maxConnections, reset)
 
-	// Check if there's a persisted limit and show it
-	if persistedLimit, err := loadPersistedLimit(); err == nil && persistedLimit != maxConnections {
+	if persistedLimit, err := server.LoadConnectionLimit(paths.dataDir); err == nil && persistedLimit != maxConnections {
 		fmt.Printf("%sNote: Server will use persisted connection limit: %d%s\n", yellow, persistedLimit, reset)
 	} else {
 		fmt.Printf("%sNote: Server may use persisted connection limit if available%s\n", yellow, reset)
 	}
 }
 
-func stopServer() {
+func stopServer(paths runtimePaths) {
 	// Check if running with sudo privileges
 	if !isRunningAsRoot() {
 		fmt.Printf("%sError:%s ShibuDB stop command requires sudo privileges. Please run with 'sudo shibudb stop'.\n", red, reset)
@@ -729,11 +775,10 @@ func stopServer() {
 	}
 
 	// Check if server is running
-	if running, pid := isServerRunning(); !running {
+	if running, pid := isServerRunning(paths.pidFile); !running {
 		fmt.Printf("%sError:%s ShibuDB server is not running.\n", red, reset)
 		os.Exit(1)
 	} else {
-		// Server is running, stop it
 		proc, err := os.FindProcess(pid)
 		if err != nil {
 			fmt.Printf("%sError:%s Failed to find process %d: %v\n", red, reset, pid, err)
@@ -746,7 +791,7 @@ func stopServer() {
 			os.Exit(1)
 		}
 
-		os.Remove(pidFile)
+		os.Remove(paths.pidFile)
 		fmt.Printf("%sShibuDB stopped (PID: %d).%s\n", green, pid, reset)
 	}
 }
@@ -1074,29 +1119,9 @@ func resetManagerLimit(baseURL string) {
 	}
 }
 
-func loadPersistedLimit() (int32, error) {
-	data, err := os.ReadFile("/usr/local/var/lib/shibudb/connection_limit.json")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, fmt.Errorf("no persisted limit found")
-		}
-		return 0, err
-	}
 
-	var config struct {
-		MaxConnections int32 `json:"max_connections"`
-	}
-
-	if err := json.Unmarshal(data, &config); err != nil {
-		return 0, err
-	}
-
-	return config.MaxConnections, nil
-}
-
-func openLogFile() *os.File {
+func openLogFile(logFilePath string) *os.File {
 	logDir := filepath.Dir(logFilePath)
-	// Directory should already exist from validation, but create it just in case
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		log.Fatalf("Unable to create log directory %s: %v", logDir, err)
 	}

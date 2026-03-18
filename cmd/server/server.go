@@ -30,15 +30,18 @@ type ConnectionManager struct {
 	// Dynamic limit management
 	limitUpdateChan chan int32
 	shutdownChan    chan struct{}
+	dataDir         string
 }
 
-// NewConnectionManager creates a new connection manager with the specified limit
-func NewConnectionManager(maxConnections int32) *ConnectionManager {
+// NewConnectionManager creates a new connection manager with the specified limit.
+// dataDir is used to persist the connection limit across restarts.
+func NewConnectionManager(maxConnections int32, dataDir string) *ConnectionManager {
 	cm := &ConnectionManager{
 		maxConnections:  maxConnections,
 		semaphore:       make(chan struct{}, maxConnections),
 		limitUpdateChan: make(chan int32, 10), // Buffer for limit updates
 		shutdownChan:    make(chan struct{}),
+		dataDir:         dataDir,
 	}
 
 	// Start the dynamic limit manager
@@ -87,7 +90,7 @@ func (cm *ConnectionManager) updateLimit(newLimit int32) {
 	fmt.Printf("Connection limit updated: %d -> %d (active: %d)\n", oldLimit, newLimit, active)
 
 	// Save the new limit persistently
-	if err := SaveConnectionLimit(newLimit); err != nil {
+	if err := SaveConnectionLimit(cm.dataDir, newLimit); err != nil {
 		fmt.Printf("Warning: Failed to save connection limit: %v\n", err)
 	}
 }
@@ -193,7 +196,7 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	}
 
 	// Load persistent connection limit if available
-	persistentLimit := GetPersistentLimit(maxConnections)
+	persistentLimit := GetPersistentLimit(dataFolderPath, maxConnections)
 	actualLimit := maxConnections
 	if persistentLimit != maxConnections {
 		fmt.Printf("Using persisted connection limit: %d (instead of %d)\n", persistentLimit, maxConnections)
@@ -201,7 +204,7 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	}
 
 	// Create connection manager
-	connManager := NewConnectionManager(actualLimit)
+	connManager := NewConnectionManager(actualLimit, dataFolderPath)
 	defer connManager.Shutdown()
 
 	// Start connection monitoring goroutine

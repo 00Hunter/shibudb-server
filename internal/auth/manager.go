@@ -42,6 +42,38 @@ func NewAuthManager(filePath string) (*AuthManager, error) {
 	return manager, nil
 }
 
+// NewAuthManagerWithBootstrap is like NewAuthManager but uses the provided credentials
+// for the initial admin bootstrap instead of prompting stdin. If the auth file already
+// exists the credentials are ignored and the file is loaded normally.
+func NewAuthManagerWithBootstrap(filePath, adminUser, adminPassword string) (*AuthManager, error) {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	manager := &AuthManager{
+		filePath: filePath,
+		users:    make(map[string]models.User),
+	}
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		if adminUser != "" && adminPassword != "" {
+			if err := manager.bootstrapAdminWithCredentials(adminUser, adminPassword); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := manager.bootstrapAdmin(); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if err := manager.load(); err != nil {
+			return nil, err
+		}
+	}
+
+	return manager, nil
+}
+
 // Bootstrap initial admin user
 func (a *AuthManager) bootstrapAdmin() error {
 	var username, password string
@@ -60,6 +92,22 @@ func (a *AuthManager) bootstrapAdmin() error {
 		return err
 	}
 
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	a.users[username] = models.User{
+		Username:    username,
+		Password:    string(hash),
+		Role:        RoleAdmin,
+		Permissions: map[string]string{},
+	}
+
+	return a.save()
+}
+
+func (a *AuthManager) bootstrapAdminWithCredentials(username, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err

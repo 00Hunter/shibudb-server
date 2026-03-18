@@ -4,12 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
-)
-
-const (
-	configDir  = "/usr/local/var/lib/shibudb"
-	configFile = "/usr/local/var/lib/shibudb/connection_limit.json"
 )
 
 // ConnectionConfig stores persistent connection settings
@@ -18,13 +14,13 @@ type ConnectionConfig struct {
 	LastUpdated    string `json:"last_updated"`
 }
 
-// SaveConnectionLimit persists the connection limit to disk
-func SaveConnectionLimit(limit int32) error {
-	// Ensure config directory exists
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+// SaveConnectionLimit persists the connection limit to disk under dataDir.
+func SaveConnectionLimit(dataDir string, limit int32) error {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %v", err)
 	}
 
+	cfgFile := filepath.Join(dataDir, "connection_limit.json")
 	config := ConnectionConfig{
 		MaxConnections: limit,
 		LastUpdated:    fmt.Sprintf("%d", time.Now().Unix()),
@@ -35,20 +31,20 @@ func SaveConnectionLimit(limit int32) error {
 		return fmt.Errorf("failed to marshal config: %v", err)
 	}
 
-	if err := os.WriteFile(configFile, data, 0644); err != nil {
+	if err := os.WriteFile(cfgFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
 
-	fmt.Printf("Connection limit saved to: %s\n", configFile)
+	fmt.Printf("Connection limit saved to: %s\n", cfgFile)
 	return nil
 }
 
-// LoadConnectionLimit loads the persisted connection limit
-func LoadConnectionLimit() (int32, error) {
-	data, err := os.ReadFile(configFile)
+// LoadConnectionLimit loads the persisted connection limit from dataDir.
+func LoadConnectionLimit(dataDir string) (int32, error) {
+	cfgFile := filepath.Join(dataDir, "connection_limit.json")
+	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File doesn't exist, return default
 			return 1000, nil
 		}
 		return 0, fmt.Errorf("failed to read config file: %v", err)
@@ -62,9 +58,9 @@ func LoadConnectionLimit() (int32, error) {
 	return config.MaxConnections, nil
 }
 
-// GetPersistentLimit returns the limit to use, preferring persisted value over default
-func GetPersistentLimit(defaultLimit int32) int32 {
-	persistedLimit, err := LoadConnectionLimit()
+// GetPersistentLimit returns the limit to use, preferring the persisted value over defaultLimit.
+func GetPersistentLimit(dataDir string, defaultLimit int32) int32 {
+	persistedLimit, err := LoadConnectionLimit(dataDir)
 	if err != nil {
 		fmt.Printf("Warning: Failed to load persisted limit: %v\n", err)
 		fmt.Printf("Using default limit: %d\n", defaultLimit)
