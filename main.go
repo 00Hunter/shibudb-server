@@ -1,6 +1,6 @@
 /*
 ShibuDb - Fast, reliable, and scalable database with vector search capabilities.
-Copyright (C) 2025 Podcopic Labs
+Copyright (C) 2026 Podcopic Labs
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -305,7 +305,7 @@ func resolveDefaultMaxConnections() int32 {
 func printVersion() {
 	fmt.Printf("ShibuDB version %s\n", Version)
 	fmt.Printf("Build time: %s\n", BuildTime)
-	fmt.Printf("Copyright (C) 2025 Podcopic Labs\n")
+	fmt.Printf("Copyright (C) 2026 Podcopic Labs\n")
 	fmt.Printf("License: GNU Affero General Public License v3.0\n")
 	fmt.Printf("For more information, visit: https://github.com/shibudb.org/shibudb-server\n")
 }
